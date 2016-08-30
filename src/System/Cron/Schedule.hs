@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE FlexibleContexts           #-}
 --------------------------------------------------------------------
 -- |
 -- Module      : System.Cron.Schedule
@@ -49,9 +50,11 @@ module System.Cron.Schedule
 import           Control.Applicative
 #endif
 import           Control.Concurrent
+import           Control.Monad.Base
 import           Control.Monad.Except
 import           Control.Monad.Identity
 import           Control.Monad.State
+import           Control.Monad.Trans.Control
 import           Data.Attoparsec.Text       (parseOnly)
 import           Data.Text                  (pack)
 import           Data.Time
@@ -76,13 +79,13 @@ readTime' = readTime
 
 -------------------------------------------------------------------------------
 -- | Scheduling Monad
-data Job = Job CronSchedule (IO ())
+data Job m = Job CronSchedule (m ())
 
 -------------------------------------------------------------------------------
-type Jobs = [Job]
+type Jobs m = [Job m]
 
 
-instance Show Job where
+instance Show (Job m) where
     show (Job c _) = "(Job " ++ show c ++ ")"
 
 
@@ -96,20 +99,20 @@ type Schedule = ScheduleT Identity
 
 
 -------------------------------------------------------------------------------
-newtype ScheduleT m a = ScheduleT { unSchedule :: StateT Jobs (ExceptT ScheduleError m) a }
+newtype ScheduleT m a = ScheduleT { unSchedule :: StateT (Jobs IO) (ExceptT ScheduleError m) a }
         deriving ( Functor, Applicative, Monad
-                 , MonadState Jobs
+                 , MonadState (Jobs IO)
                  , MonadError ScheduleError
                  )
 
 
 -------------------------------------------------------------------------------
-runSchedule :: Schedule a -> Either ScheduleError (a, [Job])
+runSchedule :: Schedule a -> Either ScheduleError (a, [Job IO])
 runSchedule = runIdentity . runScheduleT
 
 
 -------------------------------------------------------------------------------
-runScheduleT :: ScheduleT m a -> m (Either ScheduleError (a, [Job]))
+runScheduleT :: ScheduleT m a -> m (Either ScheduleError (a, [Job IO]))
 runScheduleT = runExceptT . flip runStateT [] . unSchedule
 
 
@@ -118,7 +121,7 @@ class MonadSchedule m where
     addJob ::  IO () -> String -> m ()
 
 instance (Monad m) => MonadSchedule (ScheduleT m) where
-    addJob a t = do s :: Jobs <- get
+    addJob a t = do s :: Jobs IO <- get
                     case parseOnly cronSchedule (pack t) of
                         Left  e  -> throwError $ ParseError e
                         Right t' -> put $ Job t' a : s
@@ -147,11 +150,11 @@ execSchedule s = let res = runSchedule s
 -- intervals. Each time it is run, a new thread is forked for it,
 -- meaning that a single exception does not take down the
 -- scheduler.
-forkJob :: Job -> IO ThreadId
-forkJob (Job s a) = forkIO $ forever $ do
-            (timeAt, delay) <- findNextMinuteDelay
-            threadDelay delay
-            when (scheduleMatches s timeAt) (void $ forkIO a)
+forkJob :: MonadBaseControl IO m => Job m -> m ThreadId
+forkJob (Job s a) = liftBaseDiscard forkIO $ forever $ do
+            (timeAt, delay) <- liftBase $ findNextMinuteDelay
+            liftBase $ threadDelay delay
+            when (scheduleMatches s timeAt) (void $ liftBaseDiscard forkIO a)
 
 
 -------------------------------------------------------------------------------
