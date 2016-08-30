@@ -33,6 +33,7 @@
 module System.Cron.Schedule
     ( Job (..)
     , mkJob
+    , runJobs
 
     , ScheduleError (..)
     , Schedule
@@ -58,6 +59,9 @@ import           Control.Monad.Identity
 import           Control.Monad.State
 import           Control.Monad.Trans.Control
 import           Data.Attoparsec.Text       (parseOnly)
+import           Data.Function
+import           Data.List
+import           Data.Maybe
 import           Data.Text                  (pack)
 import           Data.Time
 #if !MIN_VERSION_time(1,5,0)
@@ -69,14 +73,6 @@ import           System.Cron.Parser
 import           System.Cron.Types
 -------------------------------------------------------------------------------
 
-
-
-readTime' :: TimeLocale -> String -> String -> UTCTime
-#if MIN_VERSION_time(1,5,0)
-readTime' =  parseTimeOrError True
-#else
-readTime' = readTime
-#endif
 
 
 -------------------------------------------------------------------------------
@@ -147,32 +143,32 @@ execSchedule :: Schedule () -> IO [ThreadId]
 execSchedule s = let res = runSchedule s
                   in case res of
                         Left  e         -> print e >> return []
-                        Right (_, jobs) -> mapM forkJob jobs
-
-
--------------------------------------------------------------------------------
--- | Start a job-runner thread that runs a job at appropriate
--- intervals. Each time it is run, a new thread is forked for it,
--- meaning that a single exception does not take down the
--- scheduler.
-forkJob :: MonadBaseControl IO m => Job m -> m ThreadId
-forkJob (Job s a) = liftBaseDiscard forkIO $ forever $ do
-            (timeAt, delay) <- liftBase $ findNextMinuteDelay
-            liftBase $ threadDelay delay
-            when (scheduleMatches s timeAt) (void $ liftBaseDiscard forkIO a)
-
+                        Right (_, jobs) -> (:[]) <$> forkIO (runJobs jobs)
 
 -------------------------------------------------------------------------------
-findNextMinuteDelay :: IO (UTCTime, Int)
-findNextMinuteDelay = do
-        now <- getCurrentTime
-        let f     = formatTime defaultTimeLocale fmtFront now
-            m     = (read (formatTime defaultTimeLocale fmtMinutes now) :: Int) + 1
-            r     = f ++ ":" ++ if length (show m) == 1 then "0" ++ show m else show m
-            next  = readTime' defaultTimeLocale fmtRead r :: UTCTime
-            diff  = diffUTCTime next now
-            delay = round (realToFrac (diff * 1000000) :: Double) :: Int
-        return (next, delay)
-    where fmtFront   = "%F %H"
-          fmtMinutes = "%M"
-          fmtRead    = "%F %H:%M"
+
+-- | Run a set of jobs at the appropriate times. The current thread is used
+-- as the manager, and will spend most of its time sleeping. When a job
+-- comes due, a thread is forked to run it. If none of the given jobs will
+-- ever match, this function returns immediately.
+runJobs :: MonadBaseControl IO m => [Job m] -> m ()
+runJobs jobs = go
+  where
+    go = do
+        now <- liftBase getCurrentTime
+        let matches = mapMaybe (\(Job sched act) -> (,) act <$> nextMatch sched now) jobs
+        case sortBy (compare `on` snd) matches of
+            [] -> return ()  -- none of the jobs will ever match; break
+            (act,time):_ -> do
+                liftBase (sleepUntil time)         -- wait until the next match
+                void (liftBaseDiscard forkIO act)  -- fork the next action
+                go                                 -- loop
+
+-- | Sleep the current thread until the given time (or shortly thereafter).
+sleepUntil :: UTCTime -> IO ()
+sleepUntil alarm = do
+    now <- getCurrentTime
+    let diff = diffUTCTime alarm now
+    -- NOTE: GHC doesn't guarantee that the thread will be woken up promptly,
+    -- but in practice this is rarely an issue.
+    threadDelay $ round $ diff * 1.0e6
