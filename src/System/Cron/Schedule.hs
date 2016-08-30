@@ -32,6 +32,8 @@
 
 module System.Cron.Schedule
     ( Job (..)
+    , mkJob
+
     , ScheduleError (..)
     , Schedule
     , ScheduleT (..)
@@ -81,6 +83,12 @@ readTime' = readTime
 -- | Scheduling Monad
 data Job m = Job CronSchedule (m ())
 
+mkJob :: String -> m () -> Either ScheduleError (Job m)
+mkJob schedStr act =
+    case parseOnly cronSchedule (pack schedStr) of
+        Left  e     -> Left $ ParseError e
+        Right sched -> Right $ Job sched act
+
 -------------------------------------------------------------------------------
 type Jobs m = [Job m]
 
@@ -121,10 +129,7 @@ class MonadSchedule m where
     addJob ::  IO () -> String -> m ()
 
 instance (Monad m) => MonadSchedule (ScheduleT m) where
-    addJob a t = do s :: Jobs IO <- get
-                    case parseOnly cronSchedule (pack t) of
-                        Left  e  -> throwError $ ParseError e
-                        Right t' -> put $ Job t' a : s
+    addJob a t = either throwError (modify . (:)) $ mkJob t a
 
 
 -------------------------------------------------------------------------------
