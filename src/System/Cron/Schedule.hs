@@ -53,6 +53,7 @@ module System.Cron.Schedule
 import           Control.Applicative
 #endif
 import           Control.Concurrent
+import           Control.Exception.Base
 import           Control.Monad.Base
 import           Control.Monad.Except
 import           Control.Monad.Identity
@@ -64,6 +65,7 @@ import           Data.List
 import           Data.Maybe
 import           Data.Text                  (pack)
 import           Data.Time
+import           Data.Typeable
 #if !MIN_VERSION_time(1,5,0)
 import           System.Locale
 #endif
@@ -95,7 +97,9 @@ instance Show (Job m) where
 
 -------------------------------------------------------------------------------
 data ScheduleError = ParseError String
-                   deriving (Show)
+                   deriving (Show, Typeable)
+
+instance Exception ScheduleError
 
 
 -------------------------------------------------------------------------------
